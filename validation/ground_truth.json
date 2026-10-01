@@ -1,0 +1,17 @@
+{
+  "_comment": "Vul hier de ECHTE handmaten van de put van data/scan.ply in (mm). null = niet gemeten. Zie ground_truth.example.json.",
+  "scan": "scan.ply",
+  "measured_by": "",
+  "date": "",
+  "method": "",
+  "put": {
+    "width_x_mm": null,
+    "width_y_mm": null,
+    "diameter_mm": null,
+    "depth_mm": null
+  },
+  "connections": [
+    {"id": "A1", "angle_deg": 94, "diameter_mm": null, "crown_mm": null, "invert_bob_mm": null},
+    {"id": "A2", "angle_deg": 268, "diameter_mm": null, "crown_mm": null, "invert_bob_mm": null}
+  ]
+}

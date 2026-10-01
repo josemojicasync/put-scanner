@@ -1,0 +1,17 @@
+{
+  "_comment": "VOORBEELD met verzonnen waarden. Kopieer naar ground_truth.json en vul de echte handmaten in (mm). Laat null staan wat niet gemeten is.",
+  "scan": "scan.ply",
+  "measured_by": "",
+  "date": "",
+  "method": "rolmaat / duimstok / tekening",
+  "put": {
+    "width_x_mm": 800,
+    "width_y_mm": 800,
+    "diameter_mm": null,
+    "depth_mm": 2700
+  },
+  "connections": [
+    {"id": "A1", "angle_deg": 88, "diameter_mm": 315, "crown_mm": null, "invert_bob_mm": null},
+    {"id": "A2", "angle_deg": 274, "diameter_mm": null, "crown_mm": null, "invert_bob_mm": null}
+  ]
+}
