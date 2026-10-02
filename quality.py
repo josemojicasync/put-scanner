@@ -171,7 +171,9 @@ def assess_quality(res):
                             "Scan meer van de buis, recht ervoor en vanuit een lagere hoek.")
         elif st == ESTIMATED:
             warnings.append(f"{cid}: diameter alleen geschat (zichtbare boog {c.get('arc_deg', 0):.0f}°, "
-                            f"{c['diameter'].get('bands', '?')} stabiele banden).")
+                            + (f"3D-cilinderfit over {c['diameter'].get('bands', '?')} banden)."
+                               if c["diameter"].get("method") == "robust_3d_cylinder_fit" else
+                               f"{c['diameter'].get('bands', '?')} stabiele banden)."))
         occluded = c.get("lower_pipe_occluded")
         if occluded is None:   # método anterior (put redonda)
             hb = c["hidden_bottom"]

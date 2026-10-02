@@ -34,6 +34,19 @@ class Measurement:
 
 
 @dataclass
+class BestEstimate:
+    """Mejor valor geométrico calculado, SEPARADO de la medida aceptada (Measurement). reliability:
+    MEASURED / ESTIMATED (= la medida aceptada), UNCERTAIN (calculado pero no certificable), NOT_AVAILABLE."""
+    value: Optional[float]
+    uncertainty: Optional[float]
+    unit: str
+    method: str
+    reliability: str
+    accepted: bool                   # True: es la misma medida aceptada; False: no certificada
+    reason: str = ""
+
+
+@dataclass
 class Plane:
     level_mm: Measurement
     slope_deg: float
@@ -104,6 +117,11 @@ class Connection:
     tube_length_observed_mm: float = 0.0                # longitud con bandas válidas (cualquier radio)
     lower_pipe_occluded: Optional[bool] = None
     possible_reconstruction_fill: bool = False
+    # SOLO para dibujar: el radio de dibujo NO es una medida (si visual_only = True nunca es el diámetro)
+    visual_geometry: dict = field(default_factory=dict)
+    cylinder_fit: dict = field(default_factory=dict)    # diagnóstico del cilindro 3D robusto (método C)
+    # mejor estimación por campo (diameter_mm, crown_mm, ...): NO sustituye a las medidas aceptadas de arriba
+    best_estimate: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -274,6 +292,50 @@ def _bands(c):
     return out
 
 
+BEST_FIELDS = (("diameter", "diameter_mm", "mm"), ("crown", "crown_mm", "mm"), ("bob", "invert_bob_mm", "mm"),
+               ("axis_h", "center_height_mm", "mm"), ("bob_depth", "bob_depth_mm", "mm"),
+               ("inner_height", "inner_height_mm", "mm"), ("slope", "slope_deg", "deg"),
+               ("direction_m", "direction", "deg"), ("opening_diameter", "opening_diameter_mm", "mm"))
+
+
+def _best(c):
+    out = {}
+    for key, name, unit in BEST_FIELDS:
+        b = (c.get("best") or {}).get(key)
+        if b is None:
+            continue
+        k = 1000.0 if unit == "mm" else 1.0
+        nd = 1 if unit == "mm" else 2
+        out[name] = BestEstimate(None if b["value"] is None else round(b["value"] * k, nd),
+                                 None if b["U"] is None else round(b["U"] * k, nd), unit, b["method"],
+                                 b["reliability"], bool(b["accepted"]), b.get("reason", ""))
+    return out
+
+
+def _visual(vg):
+    if not vg:
+        return {}
+    return dict(confirmed_pipe=vg["confirmed_pipe"], axis=[round(x, 4) for x in vg["axis"]],
+                entry_mm=[round(x * 1000, 1) for x in vg["entry"]], visible_length_mm=round(vg["visible_length"] * 1000),
+                display_radius_mm=round(vg["display_radius"] * 1000, 1), display_radius_source=vg["display_radius_source"],
+                visual_only=vg["visual_only"], note=vg["note"])
+
+
+def _cylinder(cf):
+    """Resumen del ajuste de cilindro 3D. D_mm es el resultado del ajuste, NO el diámetro exportado (diameter_mm)."""
+    if not cf or not cf.get("ok_fit"):
+        return dict(ok_fit=False, reason=(cf or {}).get("reason", ""))
+    f = lambda v: None if v is None else round(float(v), 1)
+    return dict(ok_fit=True, accepted=bool(cf["measured"]), shape_ok=bool(cf.get("shape_ok")), reason=cf["reason"],
+                D_mm=f(cf["D"] * 1000), U_mm=f(cf["U"] * 1000) if np.isfinite(cf["U"]) else None,
+                axis=[round(float(x), 4) for x in cf["axis"]], tilt_deg=f(cf["tilt_deg"]), rms_mm=f(cf["rms"] * 1000),
+                residual_pct_mm=cf["res_pct_mm"], n_points=cf["n_points"], n_bands=cf["n_bands"], arc_deg=cf["arc_deg"],
+                visible_length_mm=round(cf["visible_length"] * 1000), lobo_D_mm=cf["lobo_D_mm"],
+                bootstrap_range_mm=cf["boot_D_range_mm"], profile_interval_95_mm=cf["profile_interval_mm"],
+                profile_bounded=bool(cf["profile_bounded"]), D_fixed_axis_mm=f(cf["D_fixed_axis"] * 1000),
+                residual_trend_mm=f(cf.get("residual_trend_mm")))
+
+
 def _rejected(put):
     out = []
     for o in put.get("openings", []):
@@ -353,7 +415,9 @@ def build_scan_result(res, path, elapsed_s):
             pipe_length_observed_mm=round(c.get("pipe_length_observed", 0.0) * 1000),
             tube_length_observed_mm=round(c.get("tube_length_observed", 0.0) * 1000),
             lower_pipe_occluded=c.get("lower_pipe_occluded"),
-            possible_reconstruction_fill=bool(c.get("possible_reconstruction_fill", False))))
+            possible_reconstruction_fill=bool(c.get("possible_reconstruction_fill", False)),
+            visual_geometry=_visual(c.get("visual_geometry")), cylinder_fit=_cylinder(c.get("cylinder_fit")),
+            best_estimate=_best(c)))
     quality = ScanQuality(**{k: q[k] for k in (
         "total_points", "usable_points", "analysed_points", "point_spacing_mm", "wall_density_pts_m2", "noise_mm",
         "chamber_coverage", "wall_coverage", "duplicate_fraction", "bottom_coverage", "connection_coverage_deg",

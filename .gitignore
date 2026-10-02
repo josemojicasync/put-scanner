@@ -5,3 +5,9 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+*.ply
+backup_fase*/
+backup_final_fase8/
+*.bak_before_*
+apply.py
+connections copy.py

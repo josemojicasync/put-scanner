@@ -103,6 +103,44 @@ def unknown(method, **extra):
     return meas(None, None, ONZEKER, method, UNKNOWN, **extra)
 
 
+UNCERTAIN, NOT_AVAILABLE = "UNCERTAIN", "NOT_AVAILABLE"   # fiabilidad del best_estimate (no son status de medida)
+
+
+def best_estimate(m, *candidates):
+    """BEST ESTIMATE: mejor valor geométrico calculado, separado de la medida aceptada `m` (que no se modifica).
+    - m aceptada (value no None)        -> el mismo valor; reliability = su status (MEASURED / ESTIMATED).
+    - si no, un valor YA CALCULADO con U finita (el intento guardado en m como attempt_value/attempt_U, o los
+      candidatos del llamador): el de menor U relativa; reliability = UNCERTAIN (no certificable).
+    - sin cálculo                       -> value None, reliability = NOT_AVAILABLE. Nunca se inventa un valor."""
+    m = m or {}
+    if m.get("value") is not None:
+        return dict(value=m["value"], U=m.get("U"), method=m.get("method", ""), reliability=m["status"], accepted=True,
+                    reason=m.get("reason", ""))
+    cands = list(candidates)
+    if m.get("attempt_value") is not None:
+        cands.append(dict(value=m["attempt_value"], U=m.get("attempt_U"), method=m.get("method", "")))
+    cands = [c for c in cands if c and c.get("value") is not None and c.get("U") is not None
+             and np.isfinite(c["U"]) and np.isfinite(c["value"])]
+    if cands:
+        c = min(cands, key=lambda c: c["U"] / max(abs(c["value"]), 1e-9))
+        return dict(value=float(c["value"]), U=float(c["U"]), method=c["method"], reliability=UNCERTAIN,
+                    accepted=False, reason=m.get("reason", ""))
+    return dict(value=None, U=None, method=m.get("method", ""), reliability=NOT_AVAILABLE, accepted=False,
+                reason=m.get("reason", ""))
+
+
+def connection_best(c):
+    """best_estimate de cada campo de una aansluiting. Diámetro: además del intento del ajuste de arco, el cilindro
+    3D cuando su FORMA es válida (shape_ok) aunque no sea certificable (p. ej. U > medio paso nominal)."""
+    cf = c.get("cylinder_fit") or {}
+    cyl = (dict(value=cf["D"], U=cf["U"], method="robust_3d_cylinder_fit")
+           if cf.get("ok_fit") and cf.get("shape_ok") else None)
+    out = {"diameter": best_estimate(c.get("diameter"), cyl)}
+    for k in ("crown", "bob", "axis_h", "bob_depth", "inner_height", "slope", "direction_m", "opening_diameter"):
+        out[k] = best_estimate(c.get(k))
+    return out
+
+
 def cap_status(m, max_status):
     """Limita una medida a ESTIMATED (p. ej. si la forma de la put no está confirmada)."""
     if max_status == ESTIMATED and m["status"] == MEASURED:
@@ -1045,7 +1083,8 @@ def detect_connections(L, N_L, put, rect, rng):
             elif U_sl <= SLOPE_ESTIMATED_U_DEG:
                 slope = meas(slope_v, U_sl, LAAG, "pipe_normals_axis", ESTIMATED)
             else:
-                slope = unknown("pipe_normals_axis", reason=f"±{U_sl:.1f}° > {SLOPE_ESTIMATED_U_DEG}°")
+                slope = unknown("pipe_normals_axis", reason=f"±{U_sl:.1f}° > {SLOPE_ESTIMATED_U_DEG}°",
+                                attempt_value=slope_v, attempt_U=float(U_sl))
             if direction["status"] == MEASURED:  # sección transversal perpendicular al eje medido (horizontal)
                 h = np.array([ax["axis"][0], ax["axis"][1], 0.0]); d = h / np.linalg.norm(h)
         else:
@@ -1154,6 +1193,8 @@ def analyze(pcd, seed=0):
         conns, openings, rejected = legacy, [], []
     put["openings"] = openings
     put["rejected_candidates"] = rejected
+    for c in conns:   # mejor estimación por campo (después de todo el post-proceso de la conexión)
+        c["best"] = connection_best(c)
 
     # orientación del eje vertical respecto al Z del PLY
     tilt = float(np.degrees(np.arccos(min(abs(R[2] @ np.array([0, 0, 1.0])), 1.0))))

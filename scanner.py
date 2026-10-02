@@ -1,5 +1,6 @@
 """PUT SCANNER - app principal: abrir PLY -> Analyseren -> modelo técnico 3D con medidas."""
 import argparse
+import sys
 import threading
 import time
 import traceback
@@ -25,7 +26,6 @@ C_PIPE = (0.82, 0.58, 0.28)
 CONF_COLOR = {HOOG: (0.4, 0.78, 0.5), MIDDEL: (0.85, 0.78, 0.35), LAAG: (0.92, 0.6, 0.3), ONZEKER: (0.9, 0.38, 0.35)}
 STATUS_COLOR = {MEASURED: CONF_COLOR[HOOG], ESTIMATED: CONF_COLOR[LAAG], UNKNOWN: CONF_COLOR[ONZEKER]}
 DIM_OFFSET = 0.22   # distancia de las cotas a la geometría
-PIPE_LEN = 0.55
 
 
 # ------------------------------------------------------------ formato
@@ -54,25 +54,55 @@ QUALITY_COLOR = {"GOOD": (0.4, 0.78, 0.5), "FAIR": (0.85, 0.78, 0.35), "POOR": (
                  "RESCAN": (0.9, 0.38, 0.35)}
 
 
+# fiabilidad mostrada (valor y fiabilidad separados): A) sin cálculo, B) calculado no certificable, C) estimación
+# aceptada, D) medición aceptada
+REL_NL = {MEASURED: "Gemeten", ESTIMATED: "Geschat", "UNCERTAIN": "Onzeker", "NOT_AVAILABLE": "Niet beschikbaar"}
+REL_COLOR = {"Gemeten": CONF_COLOR[HOOG], "Geschat": CONF_COLOR[LAAG], "Onzeker": CONF_COLOR[ONZEKER],
+             "Niet beschikbaar": C_DIM}
+
+
+def fmt_val(v, U, unit):
+    """valor ± U -> texto. mm < 1000 en mm, mayores en m; grados. Sin cálculo: 'Niet beschikbaar'."""
+    if v is None:
+        return "Niet beschikbaar"
+    if isinstance(v, str):
+        return v
+    if unit == "deg":
+        return f"{v:.1f}°" + ("" if U is None else f" ± {U:.1f}°")
+    if abs(v) >= 1000:
+        return f"{v / 1000:.3f}" + ("" if U is None else f" ± {U / 1000:.3f}") + " m"
+    return f"{v:.0f}" + ("" if U is None else f" ± {U:.0f}") + " mm"
+
+
 def fmt_m(m):
-    """Measurement del ScanResult -> texto. mm < 1000 en mm, mayores en m; grados; UNKNOWN sin número.
-    ESTIMATED lleva el prefijo ~ para no confundirlo con una medida."""
-    if m.value is None:
-        return "UNKNOWN"
-    if isinstance(m.value, str):
-        return m.value
-    pre = "~ " if m.status == ESTIMATED else ""
-    U = m.uncertainty
-    if m.unit == "deg":
-        return pre + f"{m.value:.1f}°" + ("" if U is None else f" ± {U:.1f}°")
-    if abs(m.value) >= 1000:
-        return pre + f"{m.value / 1000:.3f}" + ("" if U is None else f" ± {U / 1000:.3f}") + " m"
-    return pre + f"{m.value:.0f}" + ("" if U is None else f" ± {U:.0f}") + " mm"
+    return fmt_val(m.value, m.uncertainty, m.unit)
+
+
+def _row(name, value, U, unit, rel):
+    level = REL_NL.get(rel, rel)
+    vcol = C_DIM if value is None else C_TEXT
+    return ("kv", name, fmt_val(value, U, unit), level, vcol, REL_COLOR.get(level, C_DIM))
 
 
 def mrow(name, m):
-    color = CONF_COLOR[ONZEKER] if m.value is None else (C_DIM if m.status == ESTIMATED else C_TEXT)
-    return ("kv", name, fmt_m(m), CONF_NL.get(m.confidence, ""), color)
+    """Measurement aceptada (put): valor ± U + Gemeten/Geschat; sin valor -> Niet beschikbaar."""
+    return _row(name, m.value, m.uncertainty, m.unit, m.status if m.value is not None else "NOT_AVAILABLE")
+
+
+def best_of(c, key):
+    """best_estimate del ScanResult (objeto recién calculado o dict si viene de un JSON)."""
+    b = (c.best_estimate or {}).get(key)
+    if b is None or isinstance(b, dict):
+        return b
+    return dict(value=b.value, uncertainty=b.uncertainty, unit=b.unit, reliability=b.reliability)
+
+
+def brow(name, c, key, m):
+    """Campo de aansluiting: muestra la MEJOR estimación (puede ser no certificada) y su fiabilidad."""
+    b = best_of(c, key)
+    if b is None:
+        return mrow(name, m)
+    return _row(name, b["value"], b["uncertainty"], b["unit"], b["reliability"])
 
 
 def wrap(text, width):
@@ -125,16 +155,25 @@ def wall_panels(s, z0, t=0.012):
             "-Y": mesh_box(cx - hx, cy - hy - t, z0, cx + hx, cy - hy, z1)}
 
 
-def pipe_mesh(c, length=PIPE_LEN):
-    """Cilindro de la conexión: empieza en la cara interior de la pared y sale hacia fuera."""
-    d = c["direction"]
-    m = o3d.geometry.TriangleMesh.create_cylinder(c["radius"], length, resolution=48)
+def tube_frame(d):
+    """Dos vectores unitarios perpendiculares al eje d (para los anillos)."""
+    d = np.asarray(d, float) / np.linalg.norm(d)
+    ref = np.array([0, 0, 1.0]) if abs(d[2]) < 0.9 else np.array([1.0, 0, 0])
+    u = np.cross(ref, d)
+    u /= np.linalg.norm(u)
+    return u, np.cross(d, u)
+
+
+def tube_mesh(entry, d, radius, length):
+    """Tubo de la conexión: empieza en la entrada (eje ∩ pared) y sigue el eje SOLO la longitud observada."""
+    d = np.asarray(d, float) / np.linalg.norm(d)
+    m = o3d.geometry.TriangleMesh.create_cylinder(radius, length, resolution=48)
     z = np.array([0, 0, 1.0])
     axis = np.cross(z, d)
     if np.linalg.norm(axis) > 1e-9:
         angle = np.arccos(np.clip(z @ d, -1, 1))
         m.rotate(o3d.geometry.get_rotation_matrix_from_axis_angle(axis / np.linalg.norm(axis) * angle), center=[0, 0, 0])
-    m.translate(c["center"] + d * length / 2)
+    m.translate(np.asarray(entry, float) + d * length / 2)
     m.compute_vertex_normals()
     return m
 
@@ -265,7 +304,7 @@ class PutScannerApp:
             kind = spec[0]
             if kind == "head":
                 row.set(spec[1], "", spec[2] if len(spec) > 2 else "", C_HEAD, C_TEXT,
-                        STATUS_COLOR.get(spec[2], C_DIM) if len(spec) > 2 else C_DIM, H, 0, S)
+                        REL_COLOR.get(spec[2], STATUS_COLOR.get(spec[2], C_DIM)) if len(spec) > 2 else C_DIM, H, 0, S)
             elif kind == "sub":
                 row.set(spec[1], "", "", C_TEXT, fa=H)
             elif kind == "note":
@@ -277,8 +316,8 @@ class PutScannerApp:
             else:
                 _, name, value, level = spec[:4]
                 vcol = spec[4] if len(spec) > 4 else C_TEXT
-                row.set(f"{name:<13}", f"{value:>18}", level or "", C_DIM, vcol,
-                        CONF_COLOR.get(level, C_DIM), M, M, M)
+                lcol = spec[5] if len(spec) > 5 else CONF_COLOR.get(level, C_DIM)
+                row.set(f"{name:<13}", f"{value:>18}", level or "", C_DIM, vcol, lcol, M, M, M)
         self.window.set_needs_layout()
 
     def status(self, text, color=C_TEXT):
@@ -421,23 +460,34 @@ class PutScannerApp:
         g = max(ch["hx"], ch["hy"]) + 0.45
         self.add("ground", box_edges(0, 0, g, g, top, top, (0.35, 0.4, 0.38)), "line", size=1)
 
-        # conexiones: medida -> sólida; estimada -> semitransparente; desconocida -> contorno de la abertura
+        # conexiones: todo tubo confirmado se dibuja como tubo con la longitud OBSERVADA (visual_geometry).
+        # medida -> sólido; estimada -> semitransparente + anillos discontinuos; desconocida -> tubo provisional
+        # (radio SOLO VISUAL, sin cota de diámetro) + contorno observado de la abertura
         for i, c in enumerate(conns):
-            st = c["status"]
+            st = c["diameter"]["status"] if c.get("diameter") else c["status"]
             f = c["direction"][1] < -0.7  # conexión en la pared frontal: se oculta en la doorsnede
-            if st in (MEASURED, ESTIMATED) and "radius" in c:
-                u, v = c["s_axis"], np.array([0, 0, 1.0])
-                if st == MEASURED:
-                    self.add(f"pipe{i}", pipe_mesh(c), "lit", C_PIPE + (1.0,), front=f)
-                    self.add(f"pring{i}", ring(c["center"], c["radius"], u, v, C_PIPE), "line", size=2, front=f)
-                else:
-                    self.add(f"pipe{i}", pipe_mesh(c), "glass", C_PIPE + (0.28,), front=f)
-                    self.add(f"pring{i}", ring(c["center"], c["radius"], u, v, C_PIPE, dashed=True), "line",
-                             size=1.5, front=f)
-                    self.add(f"pring_out{i}", ring(c["center"] + c["direction"] * PIPE_LEN, c["radius"], u, v,
-                                                   C_PIPE, dashed=True), "line", size=1.5, front=f)
-                end = c["center"] + c["direction"] * (PIPE_LEN + 0.08) + [0, 0, c["radius"] * 0.3]
-            else:
+            vg = c.get("visual_geometry")
+            end = c["wall_center"] + c["direction"] * 0.15
+            if vg and vg["confirmed_pipe"] and vg["visible_length"] > 0:
+                e, d = np.asarray(vg["entry"], float), np.asarray(vg["axis"], float)
+                r, ln = vg["display_radius"], vg["visible_length"]
+                u, v = tube_frame(d)
+                if st == MEASURED and not vg["visual_only"]:
+                    self.add(f"pipe{i}", tube_mesh(e, d, r, ln), "lit", C_PIPE + (1.0,), front=f)
+                    self.add(f"pring{i}", ring(e, r, u, v, C_PIPE), "line", size=2, front=f)
+                    self.add(f"pring_out{i}", ring(e + d * ln, r, u, v, C_PIPE), "line", size=2, front=f)
+                elif st == ESTIMATED and not vg["visual_only"]:
+                    self.add(f"pipe{i}", tube_mesh(e, d, r, ln), "glass", C_PIPE + (0.28,), front=f)
+                    self.add(f"pring{i}", ring(e, r, u, v, C_PIPE, dashed=True), "line", size=1.5, front=f)
+                    self.add(f"pring_out{i}", ring(e + d * ln, r, u, v, C_PIPE, dashed=True), "line", size=1.5, front=f)
+                else:   # provisional: existe un tubo, pero su radio NO es una medida
+                    col = CONF_COLOR[ONZEKER]
+                    self.add(f"pipe{i}", tube_mesh(e, d, r, ln), "glass", col + (0.12,), front=f)
+                    self.add(f"pring{i}", ring(e, r, u, v, col, n=32, dashed=True), "line", size=1, front=f)
+                    self.add(f"pring_out{i}", ring(e + d * ln, r, u, v, col, n=32, dashed=True), "line", size=1, front=f)
+                self.add(f"paxis{i}", lineset([e, e + d * ln], [[0, 1]], C_DIM), "line", size=1, front=f)
+                end = e + d * (ln + 0.08) + [0, 0, r * 0.3]
+            if st == UNKNOWN:
                 # Pipe diameter UNKNOWN: show only the REAL observed wall-opening edge.
                 # Never fabricate a rectangle from opening_w/opening_h.
                 wc = c["wall_center"]
@@ -477,9 +527,13 @@ class PutScannerApp:
                             size=2,
                             front=f,
                         )
-
-                end = wc + c["direction"] * 0.15
-            self.label(end, f"A{i + 1}", STATUS_COLOR[st])
+            # UNKNOWN: el radio del tubo es solo visual -> etiqueta sin número
+            bd = (c.get("best") or {}).get("diameter")
+            txt = f"A{i + 1}"
+            if st == UNKNOWN:   # sin medida aceptada: mejor estimación marcada como onzeker, o sin número
+                txt += (f"  Ø{bd['value'] * 1000:.0f} ±{bd['U'] * 1000:.0f} (onzeker)"
+                        if bd and bd["value"] is not None else "  Ø niet beschikbaar")
+            self.label(end, txt, STATUS_COLOR[st])
 
         self._dimensions(put, conns)
 
@@ -548,7 +602,7 @@ class PutScannerApp:
         if put.depth_mm.value is not None:
             rows.append(("kv", "", f"{put.depth_mm.value:.0f} ± {put.depth_mm.uncertainty:.0f} mm", "", C_DIM))
         rows.append(mrow("Oriëntatie", put.orientation))
-        rows.append(("kv", "Buitenmaat", "niet zichtbaar", ONZEKER, C_DIM))
+        rows.append(("kv", "Buitenmaat", "Niet beschikbaar", "Niet beschikbaar", C_DIM, C_DIM))  # niet zichtbaar van binnen
         if put.walls:
             rows += [("gap",), ("note", "WANDEN (RANSAC-vlakken)")]
             for wl in put.walls:
@@ -566,25 +620,29 @@ class PutScannerApp:
         if not sr.connections:
             rows.append(("note", "Geen gevonden"))
         for c in sr.connections:
-            rows += [("gap",), ("head", f"{c.id}  wand {c.wall}", c.diameter_mm.status)]
+            bd = best_of(c, "diameter_mm")
+            rel_d = REL_NL.get(bd["reliability"], "") if bd else REL_NL.get(c.diameter_mm.status, "")
+            rows += [("gap",), ("head", f"{c.id}  wand {c.wall}", rel_d)]
             rows.append(("kv", "Hoek", f"{c.angle_deg:.0f}°", ""))
-            rows.append(mrow("Diameter", c.diameter_mm))
+            rows.append(brow("Diameter", c, "diameter_mm", c.diameter_mm))
+            rows.append(("kv", "  Betrouwbaarheid", rel_d, "", REL_COLOR.get(rel_d, C_DIM)))
             if c.nominal_suggestions:
                 rows.append(("kv", "  suggestie", " / ".join(f"Ø{n}" for n in c.nominal_suggestions) + "?", "", C_DIM))
             rows.append(("kv", "  zichtbaar", f"boog {c.visible_arc_deg:.0f}°  "
                          f"{c.observed_opening_mm['width']}x{c.observed_opening_mm['height']}", "", C_DIM))
-            rows.append(mrow("Kruin", c.crown_mm))
-            rows.append(mrow("BOB", c.invert_bob_mm))
-            rows.append(mrow("Hart", c.center_height_mm))
-            rows.append(mrow("BOB diepte", c.bob_depth_mm))
+            rows.append(brow("Kruin", c, "crown_mm", c.crown_mm))
+            rows.append(brow("BOB", c, "invert_bob_mm", c.invert_bob_mm))
+            rows.append(brow("Hart", c, "center_height_mm", c.center_height_mm))
+            rows.append(brow("BOB diepte", c, "bob_depth_mm", c.bob_depth_mm))
             if c.inner_height_mm.value is not None:
-                rows.append(mrow("Binnenhoogte", c.inner_height_mm))
-            rows.append(mrow("Richting", c.direction))
-            rows.append(mrow("Helling", c.slope_deg))
+                rows.append(brow("Binnenhoogte", c, "inner_height_mm", c.inner_height_mm))
+            rows.append(brow("Richting", c, "direction", c.direction))
+            rows.append(brow("Helling", c, "slope_deg", c.slope_deg))
         rows += [("gap",),
                  ("note", "Kruin/BOB/Hart: t.o.v. bodem. BOB diepte: t.o.v. maaiveld."),
                  ("note", "Hoek: rond de put, 0° = +X. Richting: afwijking van de wandnormaal."),
-                 ("note", "~ = geschat (ESTIMATED) · UNKNOWN = niet meetbaar met deze scan"),
+                 ("note", "Gemeten/Geschat = geaccepteerd · Onzeker = beste schatting, niet"),
+                 ("note", "gecertificeerd · Niet beschikbaar = geen berekening mogelijk"),
                  ("note", "Suggestie nominaal = GEEN meting.")]
         if len(rows) > ROWS:
             rows = rows[:ROWS - 1] + [("note", "… (zie JSON / console voor de rest)")]
@@ -651,6 +709,7 @@ class PutScannerApp:
 
 
 def main():
+    sys.stdout.reconfigure(encoding="utf-8")  # σ, Ø en el informe de consola también al redirigir (Windows cp1252)
     ap = argparse.ArgumentParser(description="PUT SCANNER")
     ap.add_argument("scan", nargs="?", default=DEFAULT_SCAN if DEFAULT_SCAN.is_file() else None)
     ap.add_argument("--auto", action="store_true", help="analizar automáticamente al abrir")

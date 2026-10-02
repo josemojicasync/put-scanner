@@ -353,6 +353,46 @@ def diag_connections(res):
         lines.append(f"  parte inferior oculta: {cn['lower_pipe_occluded']}   relleno/tapa: {cn['possible_reconstruction_fill']}")
         if cn["note"]:
             lines.append(f"  nota: {cn['note']}")
+        jf = cn.get("joint_fit")
+        if jf:
+            lines.append(f"  AJUSTE CONJUNTO (radio común, fallback sin tramo estable): {'ACEPTADO' if jf['ok'] else 'NO'}"
+                         + ("" if jf["ok"] else f" — {jf['reason']}"))
+            for k, lab in (("band_depth_cm", "bandas (cm desde la cara)"), ("D_rigid", "Ø eje rígido"),
+                           ("band_offsets_rigid_mm", "desvío por banda, eje rígido (mm)"),
+                           ("D_free_axis", "Ø eje libre"), ("free_axis_tilt_deg", "inclinación eje libre (°)"),
+                           ("band_offsets_free_mm", "desvío por banda, eje libre (mm)"),
+                           ("own_radius_trend_mm", "tendencia del radio propio (mm)"), ("arc_deg", "arco combinado (°)"),
+                           ("rms", "RMS"), ("per_band_points", "puntos por banda"), ("lobo_D_mm", "Ø leave-one-band-out (mm)")):
+                v = jf.get(k)
+                if v is None:
+                    continue
+                if k in ("D_rigid", "D_free_axis", "rms"):
+                    v = f"{v * 1000:.1f} mm"
+                elif isinstance(v, float):
+                    v = f"{v:.2f}"
+                lines.append(f"    {lab}: {v}")
+        cf = cn.get("cylinder_fit")
+        if cf and cf.get("ok_fit"):
+            used = cn["diameter"].get("method") == "robust_3d_cylinder_fit"
+            lines.append(f"  CILINDRO 3D ROBUSTO (método C): {'USADO PARA EL DIÁMETRO' if used else 'diagnóstico'}"
+                         + (f" — {cf['reason']}" if cf["reason"] else ""))
+            U = f"± {cf['U'] * 1000:.0f}" if np.isfinite(cf["U"]) else "± ?"
+            lines += [f"    Ø {cf['D'] * 1000:.1f} mm {U} (σ boot {cf.get('sigma_boot_mm', np.nan):.1f}, jack "
+                      f"{cf.get('sigma_jack_mm', np.nan):.1f}, perfil {cf.get('sigma_profile_mm', np.nan):.1f}, eje "
+                      f"{cf.get('sigma_axis_mm', np.nan):.1f} mm)",
+                      f"    eje {np.round(cf['axis'], 3).tolist()}  inclinación {cf['tilt_deg']:.1f}°  "
+                      f"Δχ²_eff eje {cf.get('axis_dchi2_eff')} (significativa: {cf.get('axis_tilt_significant')})",
+                      f"    RMS {cf['rms'] * 1000:.2f} mm (eje fijo {cf.get('rms_fixed_axis', np.nan) * 1000:.2f})  "
+                      f"residuos p5/25/50/75/95 {cf['res_pct_mm']} mm",
+                      f"    puntos {cf['n_points']}  bandas {cf['n_bands']}  arco {cf['arc_deg']:.0f}°  "
+                      f"longitud útil {cf['visible_length'] * 100:.1f} cm  bloques efectivos {cf.get('n_eff_blocks')}",
+                      f"    LOBO Ø {cf.get('lobo_D_mm')}  bootstrap {cf.get('boot_D_range_mm')}  "
+                      f"tendencia residual {cf.get('residual_trend_mm', 0):.1f} mm",
+                      f"    perfil del radio: intervalo 95% {cf.get('profile_interval_mm')} acotado={cf.get('profile_bounded')}"]
+        vg = cn.get("visual_geometry")
+        if vg:
+            lines.append(f"  Visual: r {vg['display_radius'] * 1000:.0f} mm ({vg['display_radius_source']}), "
+                         f"longitud {vg['visible_length'] * 100:.0f} cm" + ("  — SOLO VISUAL" if vg["visual_only"] else ""))
         lines += [f"  Diameter (tubo):  {_m(cn['diameter'])}",
                   f"  Kruin:            {_m(cn['crown'])}",
                   f"  BOB:              {_m(cn['bob'])}",
